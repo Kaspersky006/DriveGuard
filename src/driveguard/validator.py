@@ -48,6 +48,27 @@ def check_missing_values(
                 )
             )
 
+def check_duplicate_rows(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check for duplicate rows in the dataset.
+    """
+
+    duplicate_count = dataframe.duplicated().sum()
+
+    if duplicate_count > 0:
+        report.passed = False
+
+        report.issues.append(
+            ValidationIssue(
+                rule="Duplicate Rows",
+                severity="Medium",
+                message=f"{duplicate_count} duplicate row(s) detected."
+            )
+        )
+
 
 def validate(dataframe: pd.DataFrame) -> ValidationReport:
     """
@@ -58,5 +79,6 @@ def validate(dataframe: pd.DataFrame) -> ValidationReport:
 
     check_required_columns(dataframe, report)
     check_missing_values(dataframe, report)
+    check_duplicate_rows(dataframe, report)
 
     return report
