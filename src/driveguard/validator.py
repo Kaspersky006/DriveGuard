@@ -241,6 +241,40 @@ def check_gps_coordinates(
                 )
             )
 
+def check_timestamp_order(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check whether telemetry timestamps are in chronological order.
+    """
+
+    if "timestamp" not in dataframe.columns:
+        return
+
+    timestamps = dataframe["timestamp"]
+
+    for index in range(1, len(timestamps)):
+        previous_time = timestamps.iloc[index - 1]
+        current_time = timestamps.iloc[index]
+
+        if pd.isna(previous_time) or pd.isna(current_time):
+            continue
+
+        if current_time < previous_time:
+            report.passed = False
+
+            report.issues.append(
+                ValidationIssue(
+                    rule="Timestamp Order",
+                    severity="High",
+                    message=(
+                        f"Timestamp moved backwards from "
+                        f"{previous_time} to {current_time}."
+                    )
+                )
+            )
+
 def validate(dataframe: pd.DataFrame) -> ValidationReport:
     report = ValidationReport()
 
@@ -252,5 +286,6 @@ def validate(dataframe: pd.DataFrame) -> ValidationReport:
     check_empty_dataset(dataframe,report)
     check_negative_speed(dataframe,report)
     check_gps_coordinates(dataframe, report)
+    check_timestamp_order(dataframe, report)
 
     return report
