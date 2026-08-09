@@ -39,7 +39,6 @@ def check_missing_values(
     for column, count in missing_values.items():
 
         if count > 0:
-
             report.passed = False
 
             report.issues.append(
@@ -49,6 +48,7 @@ def check_missing_values(
                     message=f"Column '{column}' contains {count} missing value(s)."
                 )
             )
+
 
 def check_duplicate_rows(
     dataframe: pd.DataFrame,
@@ -61,7 +61,6 @@ def check_duplicate_rows(
     duplicate_count = dataframe.duplicated().sum()
 
     if duplicate_count > 0:
-
         report.passed = False
 
         report.issues.append(
@@ -71,6 +70,7 @@ def check_duplicate_rows(
                 message=f"{duplicate_count} duplicate row(s) detected."
             )
         )
+
 
 def check_speed_change(
     dataframe: pd.DataFrame,
@@ -90,7 +90,6 @@ def check_speed_change(
         previous_time = dataframe.loc[index - 1, "timestamp"]
         current_time = dataframe.loc[index, "timestamp"]
 
-        # Skip rows containing missing values.
         if pd.isna(previous_speed) or pd.isna(current_speed):
             continue
 
@@ -126,6 +125,7 @@ def check_speed_change(
                 )
             )
 
+
 def check_empty_dataset(
     dataframe: pd.DataFrame,
     report: ValidationReport
@@ -144,6 +144,7 @@ def check_empty_dataset(
                 message="The dataset contains no telemetry records."
             )
         )
+
 
 def check_duplicate_timestamps(
     dataframe: pd.DataFrame,
@@ -169,6 +170,7 @@ def check_duplicate_timestamps(
             )
         )
 
+
 def check_negative_speed(
     dataframe: pd.DataFrame,
     report: ValidationReport
@@ -192,6 +194,7 @@ def check_negative_speed(
                 message=f"{negative_speed_count} negative speed value(s) detected."
             )
         )
+
 
 def check_gps_coordinates(
     dataframe: pd.DataFrame,
@@ -241,6 +244,7 @@ def check_gps_coordinates(
                 )
             )
 
+
 def check_timestamp_order(
     dataframe: pd.DataFrame,
     report: ValidationReport
@@ -275,6 +279,7 @@ def check_timestamp_order(
                 )
             )
 
+
 def validate(dataframe: pd.DataFrame) -> ValidationReport:
     report = ValidationReport()
 
@@ -282,9 +287,9 @@ def validate(dataframe: pd.DataFrame) -> ValidationReport:
     check_missing_values(dataframe, report)
     check_duplicate_rows(dataframe, report)
     check_speed_change(dataframe, report)
-    check_duplicate_timestamps(dataframe,report)
-    check_empty_dataset(dataframe,report)
-    check_negative_speed(dataframe,report)
+    check_duplicate_timestamps(dataframe, report)
+    check_empty_dataset(dataframe, report)
+    check_negative_speed(dataframe, report)
     check_gps_coordinates(dataframe, report)
     check_timestamp_order(dataframe, report)
 
