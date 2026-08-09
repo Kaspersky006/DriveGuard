@@ -1,8 +1,13 @@
 import pandas as pd
 
-from src.driveguard.config import REQUIRED_COLUMNS
-from src.driveguard.models import ValidationIssue, ValidationReport
-
+from src.driveguard.config import (
+    REQUIRED_COLUMNS,
+    MAX_STEERING_ANGLE,
+    MAX_SPEED,
+    MAX_ACCELERATION,
+    MIN_BATTERY_LEVEL,
+    MAX_BATTERY_LEVEL,
+)
 
 def check_required_columns(
     dataframe: pd.DataFrame,
@@ -279,6 +284,173 @@ def check_timestamp_order(
                 )
             )
 
+def check_steering_angle(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check whether steering angle values exceed the configured range.
+    """
+
+    if "steering_angle" not in dataframe.columns:
+        return
+
+    invalid_count = (
+        dataframe["steering_angle"].abs() > MAX_STEERING_ANGLE
+    ).sum()
+
+    if invalid_count > 0:
+        report.passed = False
+
+        report.issues.append(
+            ValidationIssue(
+                rule="Steering Angle Range",
+                severity="High",
+                message=(
+                    f"{invalid_count} steering angle value(s) "
+                    f"exceeded ±{MAX_STEERING_ANGLE} degrees."
+                )
+            )
+        )
+
+
+def check_maximum_speed(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check for unrealistically high vehicle speed values.
+    """
+
+    if "speed" not in dataframe.columns:
+        return
+
+    invalid_count = (dataframe["speed"] > MAX_SPEED).sum()
+
+    if invalid_count > 0:
+        report.passed = False
+
+        report.issues.append(
+            ValidationIssue(
+                rule="Maximum Speed",
+                severity="High",
+                message=(
+                    f"{invalid_count} speed value(s) exceeded "
+                    f"{MAX_SPEED} km/h."
+                )
+            )
+        )
+
+
+def check_acceleration_range(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check whether acceleration values exceed the configured range.
+    """
+
+    if "acceleration" not in dataframe.columns:
+        return
+
+    invalid_count = (
+        dataframe["acceleration"].abs() > MAX_ACCELERATION
+    ).sum()
+
+    if invalid_count > 0:
+        report.passed = False
+
+        report.issues.append(
+            ValidationIssue(
+                rule="Acceleration Range",
+                severity="High",
+                message=(
+                    f"{invalid_count} acceleration value(s) exceeded "
+                    f"±{MAX_ACCELERATION} m/s²."
+                )
+            )
+        )
+
+
+def check_battery_level(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check whether battery percentage values are within 0 to 100.
+    """
+
+    if "battery_level" not in dataframe.columns:
+        return
+
+    invalid_count = (
+        (dataframe["battery_level"] < MIN_BATTERY_LEVEL) |
+        (dataframe["battery_level"] > MAX_BATTERY_LEVEL)
+    ).sum()
+
+    if invalid_count > 0:
+        report.passed = False
+
+        report.issues.append(
+            ValidationIssue(
+                rule="Battery Level Range",
+                severity="High",
+                message=(
+                    f"{invalid_count} battery level value(s) "
+                    f"were outside the valid "
+                    f"{MIN_BATTERY_LEVEL}-{MAX_BATTERY_LEVEL}% range."
+                )
+            )
+        )
+
+
+def check_numeric_columns(
+    dataframe: pd.DataFrame,
+    report: ValidationReport
+) -> None:
+    """
+    Check whether telemetry columns expected to contain numbers
+    contain numeric values.
+    """
+
+    numeric_columns = [
+        "timestamp",
+        "speed",
+        "acceleration",
+        "steering_angle",
+        "gps_lat",
+        "gps_lon",
+        "battery_level",
+    ]
+
+    for column in numeric_columns:
+
+        if column not in dataframe.columns:
+            continue
+
+        converted = pd.to_numeric(
+            dataframe[column],
+            errors="coerce"
+        )
+
+        invalid_count = (
+            converted.isna() & dataframe[column].notna()
+        ).sum()
+
+        if invalid_count > 0:
+            report.passed = False
+
+            report.issues.append(
+                ValidationIssue(
+                    rule="Numeric Data Type",
+                    severity="High",
+                    message=(
+                        f"Column '{column}' contains "
+                        f"{invalid_count} non-numeric value(s)."
+                    )
+                )
+            )
+
 
 def validate(dataframe: pd.DataFrame) -> ValidationReport:
     report = ValidationReport()
@@ -292,5 +464,10 @@ def validate(dataframe: pd.DataFrame) -> ValidationReport:
     check_negative_speed(dataframe, report)
     check_gps_coordinates(dataframe, report)
     check_timestamp_order(dataframe, report)
+    check_steering_angle(dataframe, report)
+    check_maximum_speed(dataframe, report)
+    check_acceleration_range(dataframe, report)
+    check_battery_level(dataframe, report)
+    check_numeric_columns(dataframe, report)
 
     return report
