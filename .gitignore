@@ -18,3 +18,5 @@ venv/
 # Operating system files
 desktop.ini
 .DS_Store
+# Build files
+*.egg-info/

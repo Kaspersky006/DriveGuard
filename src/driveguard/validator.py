@@ -1,473 +1,182 @@
+"""Validation: run every quality check on a telemetry DataFrame."""
+
 import pandas as pd
 
-from src.driveguard.config import (
-    REQUIRED_COLUMNS,
-    MAX_STEERING_ANGLE,
-    MAX_SPEED,
+from driveguard.config import (
     MAX_ACCELERATION,
-    MIN_BATTERY_LEVEL,
-    MAX_BATTERY_LEVEL,
+    MAX_SPEED,
+    MAX_SPEED_CHANGE_ACCELERATION,
+    MAX_STEERING_ANGLE,
+    NUMERIC_COLUMNS,
+    REQUIRED_COLUMNS,
 )
+from driveguard.reporter import ValidationReport
 
-def check_required_columns(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether all required telemetry columns are present.
-    """
 
-    missing_columns = set(REQUIRED_COLUMNS) - set(dataframe.columns)
+def _numeric(dataframe: pd.DataFrame, column: str) -> pd.Series:
+    """Return a column as numbers. Text that is not a number becomes NaN."""
+    return pd.to_numeric(dataframe[column], errors="coerce")
 
-    if missing_columns:
-        report.passed = False
 
-        report.issues.append(
-            ValidationIssue(
-                rule="Required Columns",
-                severity="High",
-                message=f"Missing required columns: {', '.join(sorted(missing_columns))}"
-            )
+# --- Incomplete data -------------------------------------------------------
+
+def check_empty_dataset(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """The file has a header but no data rows."""
+    if dataframe.empty:
+        report.add_issue("Empty Dataset", "High", "The dataset contains no telemetry records.")
+
+
+def check_required_columns(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Every column from REQUIRED_COLUMNS must exist."""
+    missing = set(REQUIRED_COLUMNS) - set(dataframe.columns)
+    if missing:
+        report.add_issue(
+            "Required Columns", "High",
+            f"Missing required columns: {', '.join(sorted(missing))}",
         )
 
 
-def check_missing_values(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check every column for missing values.
-    """
-
-    missing_values = dataframe.isnull().sum()
-
-    for column, count in missing_values.items():
-
+def check_missing_values(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """No cell may be empty."""
+    for column, count in dataframe.isnull().sum().items():
         if count > 0:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Missing Values",
-                    severity="Medium",
-                    message=f"Column '{column}' contains {count} missing value(s)."
-                )
+            report.add_issue(
+                "Missing Values", "Medium",
+                f"Column '{column}' contains {count} missing value(s).",
             )
 
 
-def check_duplicate_rows(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check for duplicate rows in the dataset.
-    """
+# --- Faulty data -----------------------------------------------------------
 
-    duplicate_count = dataframe.duplicated().sum()
-
-    if duplicate_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Duplicate Rows",
-                severity="Medium",
-                message=f"{duplicate_count} duplicate row(s) detected."
+def check_numeric_columns(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Telemetry columns must contain numbers, not text like 'abc'."""
+    for column in NUMERIC_COLUMNS:
+        if column not in dataframe.columns:
+            continue
+        converted = _numeric(dataframe, column)
+        invalid = (converted.isna() & dataframe[column].notna()).sum()
+        if invalid > 0:
+            report.add_issue(
+                "Numeric Data Type", "High",
+                f"Column '{column}' contains {invalid} non-numeric value(s).",
             )
-        )
 
 
-def check_speed_change(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Detect unrealistic speed changes between consecutive telemetry samples.
-    """
+def check_duplicate_rows(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """The same row must not appear twice."""
+    count = dataframe.duplicated().sum()
+    if count > 0:
+        report.add_issue("Duplicate Rows", "Medium", f"{count} duplicate row(s) detected.")
 
+
+def check_duplicate_timestamps(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Two samples must not have the same time."""
+    if "timestamp" not in dataframe.columns:
+        return
+    count = dataframe["timestamp"].duplicated().sum()
+    if count > 0:
+        report.add_issue("Duplicate Timestamps", "High", f"{count} duplicate timestamp(s) detected.")
+
+
+def check_timestamp_order(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Time must never go backwards."""
+    if "timestamp" not in dataframe.columns:
+        return
+    backwards = (_numeric(dataframe, "timestamp").diff() < 0).sum()
+    if backwards > 0:
+        report.add_issue("Timestamp Order", "High", f"Timestamp moved backwards {backwards} time(s).")
+
+
+def check_speed_range(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Speed must be between 0 and MAX_SPEED km/h."""
+    if "speed" not in dataframe.columns:
+        return
+    speed = _numeric(dataframe, "speed")
+
+    negative = (speed < 0).sum()
+    if negative > 0:
+        report.add_issue("Negative Speed", "High", f"{negative} negative speed value(s) detected.")
+
+    too_fast = (speed > MAX_SPEED).sum()
+    if too_fast > 0:
+        report.add_issue("Maximum Speed", "High", f"{too_fast} speed value(s) exceeded {MAX_SPEED} km/h.")
+
+
+def check_speed_change(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Speed must not change faster than a real car can accelerate or brake."""
     if "timestamp" not in dataframe.columns or "speed" not in dataframe.columns:
         return
 
-    for index in range(1, len(dataframe)):
-        previous_speed = dataframe.loc[index - 1, "speed"]
-        current_speed = dataframe.loc[index, "speed"]
+    speed_change_mps = _numeric(dataframe, "speed").diff() / 3.6   # km/h -> m/s
+    time_change_s = _numeric(dataframe, "timestamp").diff()
 
-        previous_time = dataframe.loc[index - 1, "timestamp"]
-        current_time = dataframe.loc[index, "timestamp"]
+    valid = time_change_s > 0          # skip duplicate or backwards timestamps
+    acceleration = speed_change_mps[valid] / time_change_s[valid]
 
-        if pd.isna(previous_speed) or pd.isna(current_speed):
-            continue
-
-        if pd.isna(previous_time) or pd.isna(current_time):
-            continue
-
-        time_difference = current_time - previous_time
-
-        if time_difference <= 0:
-            continue
-
-        speed_difference = current_speed - previous_speed
-
-        # Convert km/h to m/s.
-        speed_difference_mps = speed_difference / 3.6
-
-        acceleration = speed_difference_mps / time_difference
-
-        if abs(acceleration) > 12:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Unrealistic Speed Change",
-                    severity="High",
-                    message=(
-                        f"Speed changed from {previous_speed} km/h "
-                        f"to {current_speed} km/h in "
-                        f"{time_difference:.2f} second(s), "
-                        f"producing an acceleration of "
-                        f"{acceleration:.2f} m/s²."
-                    )
-                )
-            )
-
-
-def check_empty_dataset(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether the dataset contains any telemetry records.
-    """
-
-    if dataframe.empty:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Empty Dataset",
-                severity="High",
-                message="The dataset contains no telemetry records."
-            )
+    count = (acceleration.abs() > MAX_SPEED_CHANGE_ACCELERATION).sum()
+    if count > 0:
+        report.add_issue(
+            "Unrealistic Speed Change", "High",
+            f"{count} speed change(s) faster than {MAX_SPEED_CHANGE_ACCELERATION} m/s².",
         )
 
 
-def check_duplicate_timestamps(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check for duplicate timestamps in the telemetry dataset.
-    """
-
-    if "timestamp" not in dataframe.columns:
-        return
-
-    duplicate_count = dataframe["timestamp"].duplicated().sum()
-
-    if duplicate_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Duplicate Timestamps",
-                severity="High",
-                message=f"{duplicate_count} duplicate timestamp(s) detected."
-            )
-        )
-
-
-def check_negative_speed(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check for negative vehicle speed values.
-    """
-
-    if "speed" not in dataframe.columns:
-        return
-
-    negative_speed_count = (dataframe["speed"] < 0).sum()
-
-    if negative_speed_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Negative Speed",
-                severity="High",
-                message=f"{negative_speed_count} negative speed value(s) detected."
-            )
-        )
-
-
-def check_gps_coordinates(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether GPS latitude and longitude values are within valid ranges.
-    """
-
-    if "gps_lat" in dataframe.columns:
-        invalid_latitude_count = (
-            (dataframe["gps_lat"] < -90) |
-            (dataframe["gps_lat"] > 90)
-        ).sum()
-
-        if invalid_latitude_count > 0:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Invalid GPS Latitude",
-                    severity="High",
-                    message=(
-                        f"{invalid_latitude_count} invalid GPS "
-                        f"latitude value(s) detected."
-                    )
-                )
-            )
-
-    if "gps_lon" in dataframe.columns:
-        invalid_longitude_count = (
-            (dataframe["gps_lon"] < -180) |
-            (dataframe["gps_lon"] > 180)
-        ).sum()
-
-        if invalid_longitude_count > 0:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Invalid GPS Longitude",
-                    severity="High",
-                    message=(
-                        f"{invalid_longitude_count} invalid GPS "
-                        f"longitude value(s) detected."
-                    )
-                )
-            )
-
-
-def check_timestamp_order(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether telemetry timestamps are in chronological order.
-    """
-
-    if "timestamp" not in dataframe.columns:
-        return
-
-    timestamps = dataframe["timestamp"]
-
-    for index in range(1, len(timestamps)):
-        previous_time = timestamps.iloc[index - 1]
-        current_time = timestamps.iloc[index]
-
-        if pd.isna(previous_time) or pd.isna(current_time):
-            continue
-
-        if current_time < previous_time:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Timestamp Order",
-                    severity="High",
-                    message=(
-                        f"Timestamp moved backwards from "
-                        f"{previous_time} to {current_time}."
-                    )
-                )
-            )
-
-def check_steering_angle(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether steering angle values exceed the configured range.
-    """
-
+def check_steering_angle(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Steering angle must stay within ±MAX_STEERING_ANGLE degrees."""
     if "steering_angle" not in dataframe.columns:
         return
-
-    invalid_count = (
-        dataframe["steering_angle"].abs() > MAX_STEERING_ANGLE
-    ).sum()
-
-    if invalid_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Steering Angle Range",
-                severity="High",
-                message=(
-                    f"{invalid_count} steering angle value(s) "
-                    f"exceeded ±{MAX_STEERING_ANGLE} degrees."
-                )
-            )
+    count = (_numeric(dataframe, "steering_angle").abs() > MAX_STEERING_ANGLE).sum()
+    if count > 0:
+        report.add_issue(
+            "Steering Angle Range", "High",
+            f"{count} steering angle value(s) exceeded ±{MAX_STEERING_ANGLE} degrees.",
         )
 
 
-def check_maximum_speed(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check for unrealistically high vehicle speed values.
-    """
-
-    if "speed" not in dataframe.columns:
-        return
-
-    invalid_count = (dataframe["speed"] > MAX_SPEED).sum()
-
-    if invalid_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Maximum Speed",
-                severity="High",
-                message=(
-                    f"{invalid_count} speed value(s) exceeded "
-                    f"{MAX_SPEED} km/h."
-                )
-            )
-        )
-
-
-def check_acceleration_range(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether acceleration values exceed the configured range.
-    """
-
-    if "acceleration" not in dataframe.columns:
-        return
-
-    invalid_count = (
-        dataframe["acceleration"].abs() > MAX_ACCELERATION
-    ).sum()
-
-    if invalid_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Acceleration Range",
-                severity="High",
-                message=(
-                    f"{invalid_count} acceleration value(s) exceeded "
-                    f"±{MAX_ACCELERATION} m/s²."
-                )
-            )
-        )
-
-
-def check_battery_level(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether battery percentage values are within 0 to 100.
-    """
-
-    if "battery_level" not in dataframe.columns:
-        return
-
-    invalid_count = (
-        (dataframe["battery_level"] < MIN_BATTERY_LEVEL) |
-        (dataframe["battery_level"] > MAX_BATTERY_LEVEL)
-    ).sum()
-
-    if invalid_count > 0:
-        report.passed = False
-
-        report.issues.append(
-            ValidationIssue(
-                rule="Battery Level Range",
-                severity="High",
-                message=(
-                    f"{invalid_count} battery level value(s) "
-                    f"were outside the valid "
-                    f"{MIN_BATTERY_LEVEL}-{MAX_BATTERY_LEVEL}% range."
-                )
-            )
-        )
-
-
-def check_numeric_columns(
-    dataframe: pd.DataFrame,
-    report: ValidationReport
-) -> None:
-    """
-    Check whether telemetry columns expected to contain numbers
-    contain numeric values.
-    """
-
-    numeric_columns = [
-        "timestamp",
-        "speed",
-        "acceleration",
-        "steering_angle",
-        "gps_lat",
-        "gps_lon",
-        "battery_level",
-    ]
-
-    for column in numeric_columns:
-
+def check_acceleration_range(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Measured acceleration must stay within ±MAX_ACCELERATION m/s²."""
+    for column in ["acceleration_x", "acceleration_y"]:
         if column not in dataframe.columns:
             continue
-
-        converted = pd.to_numeric(
-            dataframe[column],
-            errors="coerce"
-        )
-
-        invalid_count = (
-            converted.isna() & dataframe[column].notna()
-        ).sum()
-
-        if invalid_count > 0:
-            report.passed = False
-
-            report.issues.append(
-                ValidationIssue(
-                    rule="Numeric Data Type",
-                    severity="High",
-                    message=(
-                        f"Column '{column}' contains "
-                        f"{invalid_count} non-numeric value(s)."
-                    )
-                )
+        count = (_numeric(dataframe, column).abs() > MAX_ACCELERATION).sum()
+        if count > 0:
+            report.add_issue(
+                "Acceleration Range", "High",
+                f"{count} value(s) in '{column}' exceeded ±{MAX_ACCELERATION} m/s².",
             )
+
+
+def check_gps_coordinates(dataframe: pd.DataFrame, report: ValidationReport) -> None:
+    """Latitude must be within ±90, longitude within ±180 degrees."""
+    for column, limit in [("gps_lat", 90), ("gps_lon", 180)]:
+        if column not in dataframe.columns:
+            continue
+        count = (_numeric(dataframe, column).abs() > limit).sum()
+        if count > 0:
+            report.add_issue("Invalid GPS", "High", f"{count} invalid value(s) in '{column}'.")
+
+
+# --- Run everything ----------------------------------------------------------
+
+CHECKS = [
+    check_empty_dataset,
+    check_required_columns,
+    check_missing_values,
+    check_numeric_columns,
+    check_duplicate_rows,
+    check_duplicate_timestamps,
+    check_timestamp_order,
+    check_speed_range,
+    check_speed_change,
+    check_steering_angle,
+    check_acceleration_range,
+    check_gps_coordinates,
+]
 
 
 def validate(dataframe: pd.DataFrame) -> ValidationReport:
+    """Run all checks and collect every issue in one report."""
     report = ValidationReport()
-
-    check_required_columns(dataframe, report)
-    check_missing_values(dataframe, report)
-    check_duplicate_rows(dataframe, report)
-    check_speed_change(dataframe, report)
-    check_duplicate_timestamps(dataframe, report)
-    check_empty_dataset(dataframe, report)
-    check_negative_speed(dataframe, report)
-    check_gps_coordinates(dataframe, report)
-    check_timestamp_order(dataframe, report)
-    check_steering_angle(dataframe, report)
-    check_maximum_speed(dataframe, report)
-    check_acceleration_range(dataframe, report)
-    check_battery_level(dataframe, report)
-    check_numeric_columns(dataframe, report)
-
+    for check in CHECKS:
+        check(dataframe, report)
     return report
